@@ -78,6 +78,7 @@ jobs:
           if [ -f "arch/arm64/configs/vendor/xiaomi/hyperos_${DEVICE}_defconfig" ]; then
             echo "Using 100% official HyperOS extracted defconfig: hyperos_${DEVICE}_defconfig"
             make O=out ARCH=arm64 vendor/xiaomi/hyperos_${DEVICE}_defconfig
+            make O=out ARCH=arm64 olddefconfig
           else
             ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out \
               arch/arm64/configs/vendor/kona-perf_defconfig \
@@ -99,7 +100,17 @@ jobs:
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             LLVM=1 \
             LLVM_IAS=1 \
-            -j$(nproc --all) Image dtbs
+            -j$(nproc --all) Image dtbs || {
+              echo "Compilation encountered error! Re-running with -j1 to display exact failing command:"
+              make O=out ARCH=arm64 \
+                CC=clang \
+                CROSS_COMPILE=aarch64-linux-gnu- \
+                CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+                LLVM=1 \
+                LLVM_IAS=1 \
+                -j1 Image
+              exit 1
+            }
 
           if [ ! -f "out/arch/arm64/boot/Image" ]; then
             echo "ERROR: Kernel Image build failed!"
