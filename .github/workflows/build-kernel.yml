@@ -1,0 +1,171 @@
+name: Build Xiaomi 10 Kernel with Bypass Charging
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'Target Device Config (umi=Mi 10, cmi=Mi 10 Pro, cas=Mi 10 Ultra)'
+        required: true
+        default: 'umi'
+        type: choice
+        options:
+          - umi
+          - cmi
+          - cas
+      release:
+        description: 'Create GitHub Release with compiled AnyKernel3 zip'
+        required: false
+        type: boolean
+        default: true
+  push:
+    branches:
+      - lineage-20
+      - main
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+
+jobs:
+  build:
+    name: Build Kernel for ${{ github.event.inputs.device || 'umi' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Patch Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            libncurses-dev zlib1g-dev python3 git zip curl wget \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi cpio
+
+      - name: Download AOSP Clang (r416183b)
+        run: |
+          echo "Downloading official LineageOS/AOSP Clang r416183b..."
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git $GITHUB_WORKSPACE/clang
+          echo "Clang version:"
+          $GITHUB_WORKSPACE/clang/bin/clang --version
+
+      - name: Clone Baseline Kernel Source (SM8250)
+        run: |
+          echo "Cloning official baseline kernel source..."
+          git clone --depth=1 -b lineage-20 https://github.com/LineageOS/android_kernel_xiaomi_sm8250.git $GITHUB_WORKSPACE/kernel_src
+
+      - name: Apply HyperOS Bypass & Module Compatibility Patches
+        run: |
+          echo "Applying HyperOS patches and driver modifications..."
+          # Copy modified driver files and version Makefile
+          cp -r src_modified/Makefile $GITHUB_WORKSPACE/kernel_src/Makefile
+          cp -r src_modified/kernel/module.c $GITHUB_WORKSPACE/kernel_src/kernel/module.c
+          cp -r src_modified/drivers/power/supply/qcom/* $GITHUB_WORKSPACE/kernel_src/drivers/power/supply/qcom/
+
+          # Copy official 100% matched HyperOS defconfig
+          mkdir -p $GITHUB_WORKSPACE/kernel_src/arch/arm64/configs/vendor/xiaomi/
+          cp hyperos_umi_defconfig $GITHUB_WORKSPACE/kernel_src/arch/arm64/configs/vendor/xiaomi/hyperos_umi_defconfig
+          echo "Patches applied successfully!"
+
+      - name: Configure Kernel (defconfig)
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_src
+          DEVICE="${{ github.event.inputs.device || 'umi' }}"
+          echo "Configuring kernel for device: $DEVICE"
+          mkdir -p out
+          if [ -f "arch/arm64/configs/vendor/xiaomi/hyperos_${DEVICE}_defconfig" ]; then
+            echo "Using 100% official HyperOS extracted defconfig: hyperos_${DEVICE}_defconfig"
+            make O=out ARCH=arm64 vendor/xiaomi/hyperos_${DEVICE}_defconfig
+          else
+            ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out \
+              arch/arm64/configs/vendor/kona-perf_defconfig \
+              arch/arm64/configs/vendor/xiaomi/sm8250-common.config \
+              arch/arm64/configs/vendor/xiaomi/${DEVICE}.config
+          fi
+
+      - name: Compile Kernel
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_src
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          echo "Starting compilation with $(nproc) cores..."
+          make O=out ARCH=arm64 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            -j$(nproc --all) Image dtbs
+
+          if [ ! -f "out/arch/arm64/boot/Image" ]; then
+            echo "ERROR: Kernel Image build failed!"
+            exit 1
+          fi
+          echo "Kernel compiled successfully!"
+
+      - name: Package with AnyKernel3
+        run: |
+          DEVICE="${{ github.event.inputs.device || 'umi' }}"
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
+
+          # Configure anykernel.sh for Xiaomi 10 / SM8250 devices
+          sed -i 's/kernel.string=.*/kernel.string=Xiaomi 10 Bypass Charging Kernel/g' anykernel/anykernel.sh
+          sed -i 's/device.name1=.*/device.name1=umi/g' anykernel/anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=cmi/g' anykernel/anykernel.sh
+          sed -i 's/device.name3=.*/device.name3=cas/g' anykernel/anykernel.sh
+          sed -i 's/device.name4=.*/device.name4=thyme/g' anykernel/anykernel.sh
+          sed -i 's|^BLOCK=.*|BLOCK=boot;|g' anykernel/anykernel.sh
+          sed -i 's|^block=.*|block=boot;|g' anykernel/anykernel.sh
+          sed -i 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=auto;|g' anykernel/anykernel.sh
+          sed -i 's|^is_slot_device=.*|is_slot_device=auto;|g' anykernel/anykernel.sh
+
+          # Copy built Image (AnyKernel3 will unpack original boot.img and replace Image, preserving the device's native official dtb)
+          cp $GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/Image anykernel/
+
+          cd anykernel
+          BUILD_DATE=$(date +'%Y%m%d_%H%M%S')
+          ZIP_NAME="AnyKernel3-Mi10-BypassCharging-A13-${DEVICE}-${BUILD_DATE}.zip"
+          zip -r9 "../${ZIP_NAME}" * -x .git README.md *placeholder
+
+          cd ..
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          echo "BUILD_DATE=${BUILD_DATE}" >> $GITHUB_ENV
+
+      - name: Upload Kernel Zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+
+      - name: Upload Raw Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image-Mi10-BypassCharging-${{ env.BUILD_DATE }}
+          path: kernel_src/out/arch/arm64/boot/Image
+
+      - name: Create Release
+        if: ${{ github.event.inputs.release == 'true' || github.event_name == 'push' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kernel-${{ env.BUILD_DATE }}
+          name: Xiaomi 10 Kernel (Android 13 / HyperOS) with Bypass Charging - ${{ env.BUILD_DATE }}
+          body: |
+            ### Xiaomi 10 Kernel with Bypass Charging (Android 13 / HyperOS)
+            - **Target Device**: ${{ github.event.inputs.device || 'umi' }}
+            - **Base Branch**: LineageOS 20 (Android 13 / Linux 4.19)
+            - **Patches Applied**:
+              - Hardware Bypass Charging (PMIC `chg_disable_votable`)
+              - Support `/sys/class/power_supply/battery/charging_enabled`
+              - Support `/sys/class/qcom-battery/bypass_charging_enable`
+              - Accurate `NOT_CHARGING` status feedback for ACCA
+              - HyperOS official defconfig & vermagic/signature bypass
+            - **Flash Tool**: Flash the AnyKernel3 zip via TWRP / OrangeFox Recovery or Franco Kernel Manager (FK).
+          files: |
+            ${{ env.ZIP_NAME }}
+            kernel_src/out/arch/arm64/boot/Image
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
