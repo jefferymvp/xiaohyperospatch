@@ -101,6 +101,8 @@ jobs:
           scripts/config --file out/.config --disable CONFIG_WERROR
           # 禁用与 fts_521 冲突的旧版 TOUCHSCREEN_ST，避免链接时 duplicate symbol
           scripts/config --file out/.config --disable TOUCHSCREEN_ST
+          # 启用小米10专有 USB Redriver 驱动，解决 ps5169_cfg_usb 未定义符号
+          scripts/config --file out/.config --enable PS5169
           make O=out ARCH=arm64 olddefconfig
 
       - name: Compile Kernel
