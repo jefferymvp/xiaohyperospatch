@@ -99,6 +99,8 @@ jobs:
           # 禁用把警告当错误的 WERROR，防止高版本 Clang 触发中断
           scripts/config --file out/.config --disable WERROR
           scripts/config --file out/.config --disable CONFIG_WERROR
+          # 禁用与 fts_521 冲突的旧版 TOUCHSCREEN_ST，避免链接时 duplicate symbol
+          scripts/config --file out/.config --disable TOUCHSCREEN_ST
           make O=out ARCH=arm64 olddefconfig
 
       - name: Compile Kernel
