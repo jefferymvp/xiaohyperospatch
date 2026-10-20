@@ -75,14 +75,26 @@ jobs:
           DEVICE="${{ github.event.inputs.device || 'umi' }}"
           echo "Configuring kernel for device: $DEVICE"
           mkdir -p out
-          ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out \
-            arch/arm64/configs/vendor/kona-perf_defconfig \
-            arch/arm64/configs/vendor/xiaomi/sm8250-common.config \
-            arch/arm64/configs/vendor/xiaomi/${DEVICE}.config
-          # Disable module signature enforcing for HyperOS vendor module compatibility
+          # 优先使用 hyperos_${DEVICE}_defconfig，若无则回退 merge_config
+          if [ -f "arch/arm64/configs/vendor/xiaomi/hyperos_${DEVICE}_defconfig" ]; then
+            echo "Using arch/arm64/configs/vendor/xiaomi/hyperos_${DEVICE}_defconfig"
+            cp arch/arm64/configs/vendor/xiaomi/hyperos_${DEVICE}_defconfig out/.config
+          elif [ -f "$GITHUB_WORKSPACE/hyperos_${DEVICE}_defconfig" ]; then
+            echo "Using $GITHUB_WORKSPACE/hyperos_${DEVICE}_defconfig"
+            cp $GITHUB_WORKSPACE/hyperos_${DEVICE}_defconfig out/.config
+          else
+            echo "Falling back to LineageOS merged defconfig for $DEVICE..."
+            ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out \
+              arch/arm64/configs/vendor/kona-perf_defconfig \
+              arch/arm64/configs/vendor/xiaomi/sm8250-common.config \
+              arch/arm64/configs/vendor/xiaomi/${DEVICE}.config
+          fi
+          # 强制关闭模块签名与版本CRC校验，兼容原厂 vendor ko
           scripts/config --file out/.config --disable MODULE_SIG
           scripts/config --file out/.config --disable MODULE_SIG_ALL
           scripts/config --file out/.config --disable MODULE_SIG_FORCE
+          scripts/config --file out/.config --disable MODVERSIONS
+          scripts/config --file out/.config --enable MODULE_FORCE_LOAD
           scripts/config --file out/.config --set-str MODULE_SIG_KEY ""
           make O=out ARCH=arm64 olddefconfig
 
@@ -100,7 +112,7 @@ jobs:
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             LLVM=1 \
             LLVM_IAS=1 \
-            -j$(nproc --all) Image dtbs
+            -j$(nproc --all) Image
 
           if [ ! -f "out/arch/arm64/boot/Image" ]; then
             echo "ERROR: Kernel Image build failed!"
@@ -112,35 +124,37 @@ jobs:
         run: |
           DEVICE="${{ github.event.inputs.device || 'umi' }}"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
+          rm -rf anykernel/ramdisk anykernel/patch anykernel/modules
 
-          # Configure anykernel.sh for Xiaomi 10 / SM8250 devices (A-only, non-A/B)
-          sed -i 's/kernel.string=.*/kernel.string=Xiaomi 10 Bypass Charging Kernel/g' anykernel/anykernel.sh
-          sed -i 's/device.name1=.*/device.name1=umi/g' anykernel/anykernel.sh
-          sed -i 's/device.name2=.*/device.name2=cmi/g' anykernel/anykernel.sh
-          sed -i 's/device.name3=.*/device.name3=cas/g' anykernel/anykernel.sh
-          sed -i 's/device.name4=.*/device.name4=thyme/g' anykernel/anykernel.sh
-          sed -i 's|^BLOCK=.*|BLOCK=boot;|g' anykernel/anykernel.sh
-          sed -i 's|^block=.*|block=boot;|g' anykernel/anykernel.sh
-          sed -i 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0;|g' anykernel/anykernel.sh
-          sed -i 's|^is_slot_device=.*|is_slot_device=0;|g' anykernel/anykernel.sh
+          cat << 'EOF' > anykernel/anykernel.sh
+          # AnyKernel3 Ramdisk Mod Script
+          properties() { '
+          kernel.string=Xiaomi 10 Bypass Charging Kernel
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=umi
+          device.name2=cmi
+          device.name3=cas
+          device.name4=thyme
+          supported.versions=
+          supported.patchlevels=
+          '; }
 
-          # Copy built Image
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+
+          . tools/ak3-core.sh;
+          dump_boot;
+          write_boot;
+          EOF
+
+          # 仅复制 Image，绝对不打包 LineageOS 的 dtb，保留手机原厂 boot.img 内的原生官方 dtb！
           cp $GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/Image anykernel/
-
-          # Bundle matched DTB for SM8250 (AnyKernel3 will replace boot.img's dtb with this)
-          echo "Searching and bundling compiled DTB..."
-          DTB_FILES=$(find "$GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dts" -name "*kona*.dtb" 2>/dev/null || true)
-          if [ -n "$DTB_FILES" ]; then
-            cat $DTB_FILES > anykernel/dtb
-          elif [ -f "$GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dtb" ]; then
-            cp "$GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dtb" anykernel/dtb
-          fi
-
-          if [ -s "anykernel/dtb" ]; then
-            echo "DTB successfully bundled into AnyKernel3, size: $(wc -c < anykernel/dtb) bytes"
-          else
-            echo "WARNING: No dtb found, AnyKernel3 will fall back to existing dtb in boot.img"
-          fi
 
           cd anykernel
           BUILD_DATE=$(date +'%Y%m%d_%H%M%S')
