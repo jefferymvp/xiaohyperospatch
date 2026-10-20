@@ -75,10 +75,16 @@ jobs:
           DEVICE="${{ github.event.inputs.device || 'umi' }}"
           echo "Configuring kernel for device: $DEVICE"
           mkdir -p out
-          ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out \
-            arch/arm64/configs/vendor/kona-perf_defconfig \
-            arch/arm64/configs/vendor/xiaomi/sm8250-common.config \
-            arch/arm64/configs/vendor/xiaomi/${DEVICE}.config
+          if [ "$DEVICE" = "umi" ] && [ -f "$GITHUB_WORKSPACE/hyperos_umi_defconfig" ]; then
+            echo "Applying official HyperOS defconfig for Xiaomi 10 (umi)..."
+            cp $GITHUB_WORKSPACE/hyperos_umi_defconfig out/.config
+          else
+            echo "Falling back to LineageOS merged defconfig for $DEVICE..."
+            ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out \
+              arch/arm64/configs/vendor/kona-perf_defconfig \
+              arch/arm64/configs/vendor/xiaomi/sm8250-common.config \
+              arch/arm64/configs/vendor/xiaomi/${DEVICE}.config
+          fi
           # Disable module signature enforcing for HyperOS vendor module compatibility
           scripts/config --file out/.config --disable MODULE_SIG
           scripts/config --file out/.config --disable MODULE_SIG_ALL
@@ -113,7 +119,7 @@ jobs:
           DEVICE="${{ github.event.inputs.device || 'umi' }}"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
 
-          # Configure anykernel.sh for Xiaomi 10 / SM8250 devices
+          # Configure anykernel.sh for Xiaomi 10 / SM8250 devices (A-only, non-A/B)
           sed -i 's/kernel.string=.*/kernel.string=Xiaomi 10 Bypass Charging Kernel/g' anykernel/anykernel.sh
           sed -i 's/device.name1=.*/device.name1=umi/g' anykernel/anykernel.sh
           sed -i 's/device.name2=.*/device.name2=cmi/g' anykernel/anykernel.sh
@@ -121,11 +127,25 @@ jobs:
           sed -i 's/device.name4=.*/device.name4=thyme/g' anykernel/anykernel.sh
           sed -i 's|^BLOCK=.*|BLOCK=boot;|g' anykernel/anykernel.sh
           sed -i 's|^block=.*|block=boot;|g' anykernel/anykernel.sh
-          sed -i 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=auto;|g' anykernel/anykernel.sh
-          sed -i 's|^is_slot_device=.*|is_slot_device=auto;|g' anykernel/anykernel.sh
+          sed -i 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0;|g' anykernel/anykernel.sh
+          sed -i 's|^is_slot_device=.*|is_slot_device=0;|g' anykernel/anykernel.sh
 
-          # Copy built Image (AnyKernel3 will unpack original boot.img and replace Image, preserving the device's native official dtb)
+          # Copy built Image
           cp $GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/Image anykernel/
+
+          # Bundle matched DTB for SM8250 (AnyKernel3 will replace boot.img's dtb with this)
+          echo "Searching and bundling compiled DTB..."
+          if [ -d "$GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dts/vendor/qcom" ]; then
+            find $GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dts/vendor/qcom -name "*kona*.dtb" -exec cat {} + > anykernel/dtb
+          elif [ -f "$GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dtb" ]; then
+            cp $GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dtb anykernel/dtb
+          fi
+
+          if [ -f "anykernel/dtb" ]; then
+            echo "DTB successfully bundled into AnyKernel3, size: $(wc -c < anykernel/dtb) bytes"
+          else
+            echo "WARNING: No dtb found, AnyKernel3 will fall back to existing dtb in boot.img"
+          fi
 
           cd anykernel
           BUILD_DATE=$(date +'%Y%m%d_%H%M%S')
