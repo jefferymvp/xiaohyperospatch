@@ -96,6 +96,9 @@ jobs:
           scripts/config --file out/.config --disable MODVERSIONS
           scripts/config --file out/.config --enable MODULE_FORCE_LOAD
           scripts/config --file out/.config --set-str MODULE_SIG_KEY ""
+          # 禁用把警告当错误的 WERROR，防止高版本 Clang 触发中断
+          scripts/config --file out/.config --disable WERROR
+          scripts/config --file out/.config --disable CONFIG_WERROR
           make O=out ARCH=arm64 olddefconfig
 
       - name: Compile Kernel
@@ -112,6 +115,7 @@ jobs:
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             LLVM=1 \
             LLVM_IAS=1 \
+            KCFLAGS="-Wno-error" \
             -j$(nproc --all) Image
 
           if [ ! -f "out/arch/arm64/boot/Image" ]; then
@@ -126,7 +130,7 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
           rm -rf anykernel/ramdisk anykernel/patch anykernel/modules
 
-          cat << 'EOF' > anykernel/anykernel.sh
+          cat << 'EOF' | sed 's/^          //' > anykernel/anykernel.sh
           # AnyKernel3 Ramdisk Mod Script
           properties() { '
           kernel.string=Xiaomi 10 Bypass Charging Kernel
