@@ -75,16 +75,10 @@ jobs:
           DEVICE="${{ github.event.inputs.device || 'umi' }}"
           echo "Configuring kernel for device: $DEVICE"
           mkdir -p out
-          if [ "$DEVICE" = "umi" ] && [ -f "$GITHUB_WORKSPACE/hyperos_umi_defconfig" ]; then
-            echo "Applying official HyperOS defconfig for Xiaomi 10 (umi)..."
-            cp $GITHUB_WORKSPACE/hyperos_umi_defconfig out/.config
-          else
-            echo "Falling back to LineageOS merged defconfig for $DEVICE..."
-            ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out \
-              arch/arm64/configs/vendor/kona-perf_defconfig \
-              arch/arm64/configs/vendor/xiaomi/sm8250-common.config \
-              arch/arm64/configs/vendor/xiaomi/${DEVICE}.config
-          fi
+          ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out \
+            arch/arm64/configs/vendor/kona-perf_defconfig \
+            arch/arm64/configs/vendor/xiaomi/sm8250-common.config \
+            arch/arm64/configs/vendor/xiaomi/${DEVICE}.config
           # Disable module signature enforcing for HyperOS vendor module compatibility
           scripts/config --file out/.config --disable MODULE_SIG
           scripts/config --file out/.config --disable MODULE_SIG_ALL
@@ -135,13 +129,14 @@ jobs:
 
           # Bundle matched DTB for SM8250 (AnyKernel3 will replace boot.img's dtb with this)
           echo "Searching and bundling compiled DTB..."
-          if [ -d "$GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dts/vendor/qcom" ]; then
-            find $GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dts/vendor/qcom -name "*kona*.dtb" -exec cat {} + > anykernel/dtb
+          DTB_FILES=$(find "$GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dts" -name "*kona*.dtb" 2>/dev/null || true)
+          if [ -n "$DTB_FILES" ]; then
+            cat $DTB_FILES > anykernel/dtb
           elif [ -f "$GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dtb" ]; then
-            cp $GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dtb anykernel/dtb
+            cp "$GITHUB_WORKSPACE/kernel_src/out/arch/arm64/boot/dtb" anykernel/dtb
           fi
 
-          if [ -f "anykernel/dtb" ]; then
+          if [ -s "anykernel/dtb" ]; then
             echo "DTB successfully bundled into AnyKernel3, size: $(wc -c < anykernel/dtb) bytes"
           else
             echo "WARNING: No dtb found, AnyKernel3 will fall back to existing dtb in boot.img"
